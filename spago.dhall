@@ -15,6 +15,7 @@ to generate this file without the comments in this block.
   [ "console"
   , "effect"
   , "exceptions"
+  , "maybe"
   , "node-buffer"
   , "nullable"
   , "prelude"
