@@ -11,7 +11,16 @@ When creating a new Spago project, you can use
 to generate this file without the comments in this block.
 -}
 { name = "my-project"
-, dependencies = [ "console", "effect", "prelude", "psci-support", "purescript-node-datagram" ]
+, dependencies =
+  [ "console"
+  , "effect"
+  , "exceptions"
+  , "node-buffer"
+  , "nullable"
+  , "prelude"
+  , "psci-support"
+  , "purescript-node-datagram"
+  ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]
 }
