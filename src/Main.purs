@@ -11,8 +11,9 @@ import Node.Encoding (Encoding(ASCII))
 import Node.Datagram (createSocket, bindSocket, SocketType(UDPv4), Socket, SocketInfo, onMessage)
 
 msgHandler :: Buffer -> SocketInfo -> Effect Unit
-msgHandler b i =
-  log (toString ASCII b)
+msgHandler b _ = do
+  s <- toString ASCII b
+  log s
 
 main :: Effect Unit
 main = do
