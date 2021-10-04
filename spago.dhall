@@ -15,12 +15,14 @@ to generate this file without the comments in this block.
   [ "console"
   , "effect"
   , "exceptions"
+  , "integers"
   , "maybe"
   , "node-buffer"
   , "nullable"
   , "prelude"
   , "psci-support"
   , "purescript-node-datagram"
+  , "strings"
   ]
 , packages = ./packages.dhall
 , sources = [ "src/**/*.purs", "test/**/*.purs" ]
