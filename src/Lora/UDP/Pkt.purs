@@ -1,29 +1,75 @@
 module Lora.UDP.Pkt
   (
   LoraUDPPkt(..),
+  GatewayMac(..),
+  ProtocolToken(..),
   read,
-  write
+  write,
+  parseLoraUDPPkt
   ) where
 
 import Prelude
 
-import Effect (Effect)
-import Data.Int(round, toNumber)
-import Effect.Console (log)
-import Node.Buffer as BufferMod
-import Node.Buffer (Buffer, toString, readString, writeString, size, fromArray, create)
-import Node.Encoding (Encoding(ASCII))
-import Node.Buffer.Internal as BufferInternal
+import Control.Alt ((<|>))
+import Control.Monad.Trans.Class (lift)
+import Data.ArrayBuffer.DataView (buffer, whole)
+import Data.ByteString as BS
+import Data.Either (Either(..))
+import Data.Generic.Rep (class Generic)
+import Data.Int (round, toNumber)
 import Data.Maybe (Maybe(..))
+import Data.Show.Generic (genericShow)
 import Data.String (length)
+import Effect (Effect)
+import Node.Buffer (class MutableBuffer, Buffer, create, fromArray, readString, size, toArrayBuffer, writeString)
+import Node.Buffer as BufferMod
+import Node.Buffer.Internal as BufferInternal
 import Node.Buffer.Types (BufferValueType(UInt8, UInt16LE), Octet)
-import Node.Datagram (createSocket, bindSocket, SocketType(UDPv4), Socket, SocketInfo, onMessage, send)
+import Node.Encoding (Encoding(ASCII))
+import Text.Parsing.Parser (fail, runParserT)
+import Text.Parsing.Parser.DataView (anyInt16be, satisfyInt8, takeN, takeRest)
+
+newtype ProtocolToken = ProtocolToken Int
+
+derive instance genericProtocolToken :: Generic ProtocolToken _
+instance showProtocolToken :: Show ProtocolToken where
+  show = genericShow
+
+readProtocolToken :: forall m buf. MutableBuffer buf m => Int -> buf -> m ProtocolToken
+readProtocolToken ofs buff = ProtocolToken <<< round <$> (BufferInternal.read UInt16LE ofs buff)
+
+writeProtocolToken :: forall m buf. MutableBuffer buf m => ProtocolToken -> Int -> buf -> m Unit
+writeProtocolToken (ProtocolToken token) ofs = BufferMod.write UInt16LE (toNumber token) ofs
+
+-- ------------------------------------------------------
+
+newtype GatewayMac = GatewayMac Buffer
+instance showGatewayMac :: Show GatewayMac where
+  show (GatewayMac mac) = "GatewayMac " <> BS.toString (BS.unsafeFreeze mac) BS.Hex
+
+readGatewayMac :: Int -> Int -> Buffer -> Effect GatewayMac
+readGatewayMac from to buff = do
+  mac <- BufferMod.create (to - from)
+  _ <- BufferInternal.copy from to buff 0 mac
+  pure $ GatewayMac mac
+
+writeGatewayMac :: GatewayMac -> Int -> Buffer -> Effect Int
+writeGatewayMac (GatewayMac mac) ofs = BufferInternal.copy 0 8 mac ofs
+
+-- ------------------------------------------------------
 
 data LoraUDPPkt
-    = PUSH_DATA Int String String
-    | PUSH_ACK Int
-    | PULL_DATA Int String
-    | PULL_ACK Int
+    = PUSH_DATA
+      { token :: ProtocolToken
+      , mac   :: GatewayMac
+      , json  :: String
+      }
+    | PULL_DATA
+      { token :: ProtocolToken
+      , mac   :: GatewayMac
+      }
+    | PUSH_ACK { token :: ProtocolToken }
+    | PULL_ACK { token :: ProtocolToken }
 
 read :: Buffer -> Effect (Maybe LoraUDPPkt)
 read b = do
@@ -34,16 +80,70 @@ read b = do
     Just 2 -> readPULL_DATA b
     _ -> pure Nothing
 
+
+parseLoraUDPPkt :: Buffer -> Effect (Maybe LoraUDPPkt)
+parseLoraUDPPkt buf = do
+  arrayBuf <- toArrayBuffer buf
+  let dataview = whole arrayBuf
+  parseRes <- runParserT dataview parseUDPPacket
+  case parseRes of
+    Left _ -> pure Nothing
+    Right match -> pure $ Just match
+
+  where
+    parseUDPPacket = do
+      _ <- parseVersion
+      token <- parseToken
+      parsePacketBody token
+
+    matchByte n     = void $ satisfyInt8 (_ == n)
+    parseVersion    = matchByte 2
+    parseToken      = ProtocolToken <$> anyInt16be
+    parseGatewayMac = GatewayMac <$> (dataViewToBuffer =<< takeN 8)
+
+    dataViewToBuffer = lift <<< BufferMod.fromArrayBuffer <<< buffer
+    bufferToString   = lift <<< BufferMod.toString ASCII
+
+    parsePacketBody token =  parsePUSH_DATA token
+                         <|> parsePUSH_ACK token
+                         <|> parsePULL_DATA token
+                         <|> parsePULL_RESP token
+                         <|> parsePULL_ACK token
+                         <|> fail "No valid body parsed!"
+
+    parsePUSH_DATA token = do
+      matchByte 0x00
+      mac <- parseGatewayMac
+      json <- bufferToString =<< dataViewToBuffer =<< takeRest
+      pure $ PUSH_DATA { token, mac, json }
+
+    parsePUSH_ACK token = do
+      matchByte 0x01
+      pure $ PUSH_ACK { token }
+
+    parsePULL_DATA token = do
+      matchByte 0x02
+      mac <- parseGatewayMac
+      pure $ PULL_DATA { token, mac }
+
+    parsePULL_RESP _token = do
+      matchByte 0x03
+      fail "PULL_RESP packets are currently unsupported!"
+
+    parsePULL_ACK token = do
+      matchByte 0x04
+      pure $ PUSH_ACK { token }
+
 readPUSH_DATA :: Buffer -> Effect (Maybe LoraUDPPkt)
 readPUSH_DATA buff = do
   len <- size buff
   if len < 14 then
     pure Nothing
   else do
-    token <- round <$> (BufferInternal.read UInt16LE 1 buff)
-    gw_id <- (readString ASCII 4 11 buff)
+    token <- readProtocolToken 1 buff
+    mac <- readGatewayMac 4 11 buff
     json <- (readString ASCII 12 len buff)
-    pure $ Just $ PUSH_DATA token gw_id json
+    pure $ Just $ PUSH_DATA { token, mac, json }
 
 readPUSH_ACK :: Buffer -> Effect (Maybe LoraUDPPkt)
 readPUSH_ACK buff = do
@@ -51,8 +151,8 @@ readPUSH_ACK buff = do
   if len < 4 then
     pure Nothing
   else do
-    token <- round <$> (BufferInternal.read UInt16LE 1 buff)
-    pure $ Just $ PUSH_ACK token
+    token <- readProtocolToken 1 buff
+    pure $ Just $ PUSH_ACK { token }
 
 readPULL_DATA :: Buffer -> Effect (Maybe LoraUDPPkt)
 readPULL_DATA buff = do
@@ -60,32 +160,32 @@ readPULL_DATA buff = do
   if len < 12 then
     pure Nothing
   else do
-    token <- round <$> (BufferInternal.read UInt16LE 1 buff)
-    gw_id <- (readString ASCII 4 11 buff)
-    pure $ Just $ PULL_DATA token gw_id
+    token <- readProtocolToken 1 buff
+    mac <- readGatewayMac 4 11 buff
+    pure $ Just $ PULL_DATA { token, mac }
 
 write :: LoraUDPPkt -> Effect Buffer
-write (PUSH_DATA token mac json) = do
+write (PUSH_DATA { token, mac, json }) = do
   let jsonLen = length json
-  let buffLen = jsonLen + 11
+      buffLen = jsonLen + 11
   buff <- create buffLen
   BufferMod.write UInt8 2.0 0 buff
-  BufferMod.write UInt16LE (toNumber token) 1 buff
+  writeProtocolToken token 1 buff
   BufferMod.write UInt8 0.0 3 buff
-  _ <- writeString ASCII 4 (11-4) mac buff -- TODO check result
+  _ <- writeGatewayMac mac 4 buff -- TODO check result
   _ <- writeString ASCII 12 jsonLen json buff -- TODO check result
   pure buff
 
-write (PUSH_ACK token) = do
+write (PUSH_ACK { token }) = do
   buff <- (fromArray :: Array Octet -> Effect Buffer) [2, 0, 0, 1]
-  BufferMod.write UInt16LE (toNumber token) 1 buff
+  writeProtocolToken token 1 buff
   pure buff
 
-write (PULL_DATA _ _) = create 0 -- TODO
+write (PULL_DATA _) = create 0 -- TODO
 
-write (PULL_ACK token) = do
+write (PULL_ACK { token }) = do
    buff <- (fromArray :: Array Octet -> Effect Buffer) [2, 0, 0, 4]
-   BufferMod.write UInt16LE (toNumber token) 1 buff
+   writeProtocolToken token 1 buff
    pure buff
 
 bufLoraVersion :: Buffer -> Effect Int

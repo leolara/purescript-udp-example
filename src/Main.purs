@@ -18,20 +18,20 @@ import Lora.UDP.Server as Server
 
 handler :: Server.PktHandler
 handler respond pkt = case pkt of
-  Pkt.PUSH_DATA token mac json -> do
+  Pkt.PUSH_DATA { token, mac, json } -> do
     log "PUSH_DATA"
     log $ show token
-    log mac
+    log $ show mac
     log json
-    respond (Pkt.PUSH_ACK token)
-  Pkt.PUSH_ACK token -> do
+    respond (Pkt.PUSH_ACK { token })
+  Pkt.PUSH_ACK { token } -> do
     log "PUSH_ACK"
     log $ show token
-  Pkt.PULL_DATA token mac -> do
+  Pkt.PULL_DATA { token, mac } -> do
     log "PULL_DATA"
     log $ show token
-    log $ mac
-    respond (Pkt.PULL_ACK token)
+    log $ show mac
+    respond (Pkt.PULL_ACK { token })
   _ -> do
     log "unimplemented packet"
 
