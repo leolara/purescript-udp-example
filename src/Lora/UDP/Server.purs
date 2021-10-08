@@ -24,24 +24,23 @@ start :: String -> Int -> (PktHandler) -> Effect Unit
 start addr port handler = do
   socket <- createSocket UDPv4 (Just true)
   bindSocket socket (Just port) (Just addr)
-  onMessage socket (msgHandler handler)
+  onMessage socket (msgHandler socket handler)
 
-msgHandler :: (PktHandler) -> Buffer -> SocketInfo -> Effect Unit
-msgHandler handler buff socketInfo = do
+msgHandler :: Socket -> (PktHandler) -> Buffer -> SocketInfo -> Effect Unit
+msgHandler socket handler buff socketInfo = do
   log ""
   log $ "received UDP packet from " <> socketInfo.address <> ":" <> (toStringAs decimal socketInfo.port)
   maybePkt <- Pkt.read buff
   case maybePkt of
     Just pkt -> do
-      handler (responder socketInfo.address socketInfo.port) pkt
+      handler (responder socket socketInfo.address socketInfo.port) pkt
     _ -> do
       log "unrecognized packet"
       s <- show <$> toString ASCII buff
       log s
 
-responder :: String -> Int -> Pkt.LoraUDPPkt -> Effect Unit
-responder addr port pkt = do
+responder :: Socket -> String -> Int -> Pkt.LoraUDPPkt -> Effect Unit
+responder socket addr port pkt = do
   log "sending pkt"
-  socket <- createSocket UDPv4 (Just true)
   buff <- Pkt.write pkt
   send socket buff Nothing Nothing port addr (Just $ log "sent")
