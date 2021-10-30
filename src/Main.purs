@@ -22,7 +22,7 @@ handler respond pkt = case pkt of
     log "PUSH_DATA"
     log $ show token
     log $ show mac
-    log json
+    log $ show json
     respond (Pkt.PUSH_ACK { token })
   Pkt.PUSH_ACK { token } -> do
     log "PUSH_ACK"

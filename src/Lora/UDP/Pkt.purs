@@ -3,6 +3,10 @@ module Lora.UDP.Pkt
   LoraUDPPkt(..),
   GatewayMac(..),
   ProtocolToken(..),
+  PushDataJSON(..),
+  Base64Encoded(..),
+  ReceivedPacket(..),
+  DataRate(..),
   read,
   write,
   parseLoraUDPPkt
@@ -12,9 +16,10 @@ import Prelude
 
 import Control.Alt ((<|>))
 import Control.Monad.Trans.Class (lift)
+import Data.Argonaut as A
 import Data.ArrayBuffer.DataView (buffer, whole)
 import Data.ByteString as BS
-import Data.Either (Either(..))
+import Data.Either (Either(..), either, hush)
 import Data.Generic.Rep (class Generic)
 import Data.Int (round, toNumber)
 import Data.Maybe (Maybe(..))
@@ -58,11 +63,53 @@ writeGatewayMac (GatewayMac mac) ofs = BufferInternal.copy 0 8 mac ofs
 
 -- ------------------------------------------------------
 
+newtype PushDataJSON = PushDataJSON { rxpk :: Array ReceivedPacket }
+derive newtype instance decodeJsonPushDataJSON :: A.DecodeJson PushDataJSON
+derive newtype instance encodeJsonPushDataJSON :: A.EncodeJson PushDataJSON
+derive instance genericPushDataJSON :: Generic PushDataJSON _
+instance showPushDataJSON :: Show PushDataJSON where
+  show = genericShow
+
+newtype ReceivedPacket = ReceivedPacket
+  { time :: String
+  , tmms :: Int
+  , tmst :: Int
+  , modu :: String
+  , datr :: DataRate
+  , data :: Base64Encoded
+  }
+derive newtype instance decodeJsonReceivedPacket :: A.DecodeJson ReceivedPacket
+derive newtype instance encodeJsonReceivedPacket :: A.EncodeJson ReceivedPacket
+derive instance genericReceivedPacket :: Generic ReceivedPacket _
+instance showReceivedPacket :: Show ReceivedPacket where
+  show = genericShow
+
+newtype Base64Encoded = Base64Encoded String
+derive newtype instance decodeJsonBase64Encoded :: A.DecodeJson Base64Encoded
+derive newtype instance encodeJsonBase64Encoded :: A.EncodeJson Base64Encoded
+derive instance genericBase64Encoded :: Generic Base64Encoded _
+instance showBase64Encoded :: Show Base64Encoded where
+  show = genericShow
+
+data DataRate = LoraDataRate String
+              | FSK Int
+derive instance genericDataRate :: Generic DataRate _
+instance showDataRate :: Show DataRate where
+  show = genericShow
+instance decodeJsonDataRate :: A.DecodeJson DataRate where
+  decodeJson j = decodeLoraDataRate <|> decodeFSKRate <|> reportFailure
+    where decodeLoraDataRate = LoraDataRate <$> A.decodeJson j
+          decodeFSKRate = FSK <$> A.decodeJson j
+          reportFailure = Left $ A.TypeMismatch "Expected a String or an Int"
+instance encodeJsonDataRate :: A.EncodeJson DataRate where
+  encodeJson (LoraDataRate s) = A.encodeJson s
+  encodeJson (FSK i) = A.encodeJson i
+
 data LoraUDPPkt
     = PUSH_DATA
       { token :: ProtocolToken
       , mac   :: GatewayMac
-      , json  :: String
+      , json  :: PushDataJSON
       }
     | PULL_DATA
       { token :: ProtocolToken
@@ -80,15 +127,12 @@ read b = do
     Just 2 -> readPULL_DATA b
     _ -> pure Nothing
 
-
 parseLoraUDPPkt :: Buffer -> Effect (Maybe LoraUDPPkt)
 parseLoraUDPPkt buf = do
   arrayBuf <- toArrayBuffer buf
   let dataview = whole arrayBuf
   parseRes <- runParserT dataview parseUDPPacket
-  case parseRes of
-    Left _ -> pure Nothing
-    Right match -> pure $ Just match
+  pure $ hush parseRes
 
   where
     parseUDPPacket = do
@@ -111,10 +155,14 @@ parseLoraUDPPkt buf = do
                          <|> parsePULL_ACK token
                          <|> fail "No valid body parsed!"
 
+    parseJSONString str =
+      either (fail <<< show) pure $ A.decodeJson =<< A.parseJson str
+
     parsePUSH_DATA token = do
       matchByte 0x00
       mac <- parseGatewayMac
-      json <- bufferToString =<< dataViewToBuffer =<< takeRest
+      jsonString <- bufferToString =<< dataViewToBuffer =<< takeRest
+      json <- parseJSONString jsonString
       pure $ PUSH_DATA { token, mac, json }
 
     parsePUSH_ACK token = do
@@ -142,8 +190,11 @@ readPUSH_DATA buff = do
   else do
     token <- readProtocolToken 1 buff
     mac <- readGatewayMac 4 11 buff
-    json <- (readString ASCII 12 len buff)
-    pure $ Just $ PUSH_DATA { token, mac, json }
+    jsonString <- (readString ASCII 12 len buff)
+    let ePushDataJson = do
+          json <- A.parseJson jsonString >>= A.decodeJson
+          pure $ PUSH_DATA { token, mac, json }
+    pure $ hush ePushDataJson
 
 readPUSH_ACK :: Buffer -> Effect (Maybe LoraUDPPkt)
 readPUSH_ACK buff = do
@@ -165,15 +216,16 @@ readPULL_DATA buff = do
     pure $ Just $ PULL_DATA { token, mac }
 
 write :: LoraUDPPkt -> Effect Buffer
-write (PUSH_DATA { token, mac, json }) = do
-  let jsonLen = length json
+write (PUSH_DATA { token, mac, json: PushDataJSON jsonRecord }) = do
+  let jsonString = A.stringify $ A.encodeJson jsonRecord
+      jsonLen = length jsonString
       buffLen = jsonLen + 11
   buff <- create buffLen
   BufferMod.write UInt8 2.0 0 buff
   writeProtocolToken token 1 buff
   BufferMod.write UInt8 0.0 3 buff
   _ <- writeGatewayMac mac 4 buff -- TODO check result
-  _ <- writeString ASCII 12 jsonLen json buff -- TODO check result
+  _ <- writeString ASCII 12 jsonLen jsonString buff -- TODO check result
   pure buff
 
 write (PUSH_ACK { token }) = do
